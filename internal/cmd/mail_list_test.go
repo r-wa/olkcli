@@ -109,6 +109,9 @@ func TestMailListAdmittedSelectorsSerialize(t *testing.T) {
 		{"categories", "categories", []any{"green"}},
 		{"conversationId", "conversationId", "conversation-id"},
 		{"toRecipients", "to", []any{"recipient@example.com"}},
+		{"ccRecipients", "cc", []any{"cc@example.com"}},
+		{"bccRecipients", "bcc", []any{"bcc@example.com"}},
+		{"replyTo", "replyTo", []any{"reply@example.com"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.selector, func(t *testing.T) {
@@ -130,7 +133,7 @@ func TestMailListAdmittedSelectorsSerialize(t *testing.T) {
 func TestMailListWithoutSelectKeepsDefaultJSON(t *testing.T) {
 	_, output := runMailList(t, "--json")
 	message := firstJSONMessage(t, output)
-	want := []string{"bodyPreview", "categories", "conversationId", "from", "hasAttachments", "id", "isRead", "receivedDateTime", "subject", "to"}
+	want := []string{"bcc", "bodyPreview", "categories", "cc", "conversationId", "from", "hasAttachments", "id", "isRead", "receivedDateTime", "replyTo", "subject", "to"}
 	if got := sortedJSONKeys(message); !reflect.DeepEqual(got, want) {
 		t.Errorf("default JSON keys = %v, want %v", got, want)
 	}
@@ -269,6 +272,29 @@ func TestMailThreadJSONIgnoresGlobalSelect(t *testing.T) {
 	message := firstJSONMessage(t, output)
 	if _, found := message["id"]; !found {
 		t.Errorf("mail thread applied mail-list projection: %v", message)
+	}
+}
+
+func TestMailThreadCompleteRequestsAnUnboundedProviderTraversal(t *testing.T) {
+	output, calls, err := runMailCommand(
+		t,
+		[]string{"mail", "thread"},
+		[]string{"--json", "--complete", "conversation-id"},
+		func(req *http.Request) *http.Response {
+			if got := req.URL.Query().Get("$top"); got != "1000" {
+				t.Errorf("complete thread $top = %q, want page size 1000", got)
+			}
+			return graphMessageListResponse(req)
+		},
+	)
+	if err != nil {
+		t.Fatalf("run complete mail thread: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("Graph handler calls = %d, want 1", calls)
+	}
+	if got := firstJSONMessage(t, output)["conversationId"]; got != "conversation-id" {
+		t.Fatalf("conversationId = %v, want conversation-id", got)
 	}
 }
 
@@ -456,6 +482,9 @@ func graphMessageListResponse(req *http.Request) *http.Response {
 			"subject": "Hello",
 			"from": {"emailAddress": {"address": "sender@example.com"}},
 			"toRecipients": [{"emailAddress": {"address": "recipient@example.com"}}],
+			"ccRecipients": [{"emailAddress": {"address": "cc@example.com"}}],
+			"bccRecipients": [{"emailAddress": {"address": "bcc@example.com"}}],
+			"replyTo": [{"emailAddress": {"address": "reply@example.com"}}],
 			"receivedDateTime": "2026-07-28T10:30:00Z",
 			"isRead": false,
 			"hasAttachments": true,

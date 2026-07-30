@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -37,6 +38,49 @@ func TestGetMessageRequestsAndVerifiesProviderText(t *testing.T) {
 	}
 	if msg.Body != "Provider returned text" || msg.BodyType != "text" {
 		t.Fatalf("GetMessage() body = %q type = %q, want verified provider text", msg.Body, msg.BodyType)
+	}
+}
+
+func TestGetMessageAcceptsProviderTextAlongsideImmutableIDPreference(t *testing.T) {
+	client := testGraphClient(t, func(req *http.Request) *http.Response {
+		got := req.Header.Values("Prefer")
+		slices.Sort(got)
+		if !slices.Equal(
+			got,
+			[]string{
+				`IdType="ImmutableId"`,
+				`outlook.body-content-type="text"`,
+			},
+		) {
+			t.Errorf("Prefer = %q, want provider text and immutable ID", got)
+		}
+		resp := graphJSONResponse(req, `{
+			"id":"immutable-message-one",
+			"body":{"contentType":"text","content":"Provider returned text"}
+		}`)
+		resp.Header.Set(
+			"Preference-Applied",
+			`outlook.body-content-type="text", IdType="ImmutableId"`,
+		)
+		return resp
+	})
+	client.SetImmutableIDs(true)
+
+	msg, err := client.GetMessage(
+		context.Background(),
+		"",
+		"immutable-message-one",
+		MessageBodyText,
+	)
+	if err != nil {
+		t.Fatalf("GetMessage() error = %v", err)
+	}
+	if msg.Body != "Provider returned text" || msg.BodyType != "text" {
+		t.Fatalf(
+			"GetMessage() body = %q type = %q, want verified provider text",
+			msg.Body,
+			msg.BodyType,
+		)
 	}
 }
 
@@ -252,6 +296,74 @@ func TestListThreadDiscoversPagedMetadataThenFetchesAcknowledgedBatchChunks(t *t
 	}
 	if len(messages) != 21 || messages[0].ID != "message-00" || messages[20].ID != "message-20" {
 		t.Fatalf("sorted message IDs start/end = %q/%q count=%d, want message-00/message-20 count=21", messages[0].ID, messages[len(messages)-1].ID, len(messages))
+	}
+}
+
+func TestListCompleteThreadConsumesEveryProviderPage(t *testing.T) {
+	requests := 0
+	var batchSizes []int
+	client := testGraphClient(t, func(req *http.Request) *http.Response {
+		requests++
+		switch requests {
+		case 1:
+			if got := req.URL.Query().Get("$top"); got != "1000" {
+				t.Errorf("first metadata $top = %q, want 1000-page request", got)
+			}
+			if got := req.URL.Query().Get("$select"); got != "id" {
+				t.Errorf("metadata $select = %q, want id", got)
+			}
+			return graphMessageIDsResponse(
+				req,
+				[]string{"message-02", "message-01"},
+				"https://graph.microsoft.com/v1.0/me/messages?$skiptoken=second",
+			)
+		case 2:
+			return graphMessageIDsResponse(
+				req,
+				[]string{"message-00"},
+				"",
+			)
+		case 3:
+			batch := decodeBodyPreferenceBatch(t, req)
+			batchSizes = append(batchSizes, len(batch))
+			return graphThreadBatchResponse(
+				t,
+				req,
+				batch,
+				"conversation-one",
+				true,
+				nil,
+			)
+		default:
+			t.Fatalf("unexpected request %d", requests)
+			return nil
+		}
+	})
+
+	messages, err := client.ListCompleteThread(
+		context.Background(),
+		"",
+		"conversation-one",
+		MessageBodyText,
+	)
+	if err != nil {
+		t.Fatalf("ListCompleteThread() error = %v", err)
+	}
+	if requests != 3 {
+		t.Fatalf("request count = %d, want 3", requests)
+	}
+	if !reflect.DeepEqual(batchSizes, []int{3}) {
+		t.Fatalf("batch sizes = %v, want [3]", batchSizes)
+	}
+	if len(messages) != 3 ||
+		messages[0].ID != "message-00" ||
+		messages[2].ID != "message-02" {
+		t.Fatalf(
+			"sorted message IDs start/end count = %q/%q %d",
+			messages[0].ID,
+			messages[len(messages)-1].ID,
+			len(messages),
+		)
 	}
 }
 
